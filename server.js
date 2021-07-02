@@ -20,54 +20,57 @@ const app = express()
 app.use(express.json())
 app.use(cors())
 
-
-const database = {
-    users: [
-        {
-            id: "111",
-            name: 'john',
-            email: 'john@email.com',
-            password: 'cookies',
-            entries: 0,
-            joined: new Date()
-        },
-        {
-            id: "112",
-            name: 'Sally',
-            email: 'Sally@email.com',
-            password: 'bananas',
-            entries: 0,
-            joined: new Date()
-        }
-    ]
-}
-
 app.get('/', (request, response) => {
-    response.send(database.users)
+    response.send('Welcome to smart-brain API')
 })
 
 app.post('/signin', (request, response) => {
-    if(request.body.email === database.users[0].email &&
-        request.body.password === database.users[0].password){
-            response.json(database.users[0]);
-    }
-    else{
-        response.status('400').json('error logging in!')
-    }
+    postgres.select('email', 'hash').from('login')
+            .where('email', '=', request.body.email)
+            .then( data => {
+                const isValid = bcrypt.compareSync(request.body.password, data[0].hash);
+                if(isValid){
+                    return postgres.select('*').from('users')
+                            .where('email', '=', request.body.email)
+                            .then(user => {
+                                response.json(user[0])
+                            })
+                            .catch(err => response.status(400).json('unable to get user.'))
+                }
+                else{
+                    response.status(400).json('wrong credentials.')
+                }
+            })
+            .catch(err => response.status(400).json('wrong credentials.'))
+
 })
 
 app.post('/register', (request, response) => {
     const {email, name, password} = request.body
 
-    postgres('users')
-    .returning('*')
-    .insert({
-        email: email,
-        name: name,
-        joined: new Date()
-    })
-    .then(user => {
-        response.json(user[0])
+    var salt = bcrypt.genSaltSync(10);
+    const hash = bcrypt.hashSync(password, salt);
+    postgres.transaction( trx => {
+        trx.insert({
+            hash: hash,
+            email: email
+        })
+        .into('login')
+        .returning('email')
+        .then( loginEmail => {
+            return trx('users')
+                    .returning('*')
+                    .insert({
+                        email: loginEmail[0],
+                        name: name,
+                        joined: new Date()
+                    })
+                    .then(user => {
+                        response.json(user[0])
+                    })
+        })
+        .then(trx.commit)
+        .catch(trx.rollback)
     })
     .catch(error => response.status(400).json('Email already exists.'))
 })
@@ -75,32 +78,45 @@ app.post('/register', (request, response) => {
 app.get('/profile/:id', (request, response) => {
     const { id } = request.params
     let found = false
-    database.users.forEach( user =>{
-        if(user.id === id){
-            found = true
-            return response.json(user)
-        }
-    })
+    
+    postgres.select('*')
+            .from('users')
+            .where({ id })
+            .then(user => {
+                if(user.length){
+                    response.json(user[0])
+                }
+                else{
+                    response.status(400).json('User not found.')
+                }
+            }).catch(err => response.status(404).json('no such user'))
 
-    if(!found){
-        response.status(404).json('no such user')
-    }
+    // if(!found){
+    //     response.status(404).json('no such user')
+    // }
 
 })
 
 app.put('/image', (request, response) => {
     const { id } = request.body
-    let found = false
-    database.users.forEach( user =>{
-        if(user.id === id){
-            found = true
-            user.entries++
-            return response.json(user.entries)
-        }
-    })
-    if(!found){
-        response.status(404).json('no such user')
-    }
+    
+    postgres('users')
+        .where('id', '=', id)
+        .increment('entries', 1)
+        .returning('entries')
+        .then( entries => {
+            if(entries.length){
+                response.json(entries[0])
+            }
+            else{
+                response.status(400).json('unable to get entries.')
+            }
+        })
+        .catch(err => response.status(400).json('unable to get entries.'))
+
+    // if(!found){
+    //     response.status(404).json('no such user')
+    // }
 })
 
 app.listen(3001, () => {
